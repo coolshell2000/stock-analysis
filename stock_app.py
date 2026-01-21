@@ -38,6 +38,122 @@ def detect_spikes(df: pd.DataFrame, rolling_window: int = 20, multiplier: float 
     df['Spike'] = (df['Volume'] > (multiplier * df['Vol_MA'])) & df['Vol_MA'].notna()
     return df
 
+
+def analyze_volume_price_correlation(df: pd.DataFrame, rolling_window: int = 20, multiplier: float = 2.0, forecast_days: int = 5) -> dict:
+    """Analyze historical correlation between volume spikes and price movements.
+
+    Args:
+        df: DataFrame with stock data
+        rolling_window: Number of days for volume moving average
+        multiplier: Threshold multiplier for spike detection
+        forecast_days: Number of days to look ahead for price movement
+
+    Returns:
+        Dictionary with correlation statistics
+    """
+    df = df.copy()
+    df = detect_spikes(df, rolling_window, multiplier)
+
+    # Calculate future returns
+    df['Future_Close'] = df['Close'].shift(-forecast_days)
+    df['Return'] = (df['Future_Close'] - df['Close']) / df['Close']
+
+    # Get all spikes
+    spikes = df[df['Spike']].copy()
+
+    if len(spikes) == 0:
+        return {
+            'total_spikes': 0,
+            'positive_returns': 0,
+            'negative_returns': 0,
+            'avg_return_after_spike': 0,
+            'success_rate': 0,
+            'correlation_strength': 0
+        }
+
+    # Count positive and negative returns after spikes
+    positive_returns = len(spikes[spikes['Return'] > 0])
+    negative_returns = len(spikes[spikes['Return'] < 0])
+    avg_return = spikes['Return'].mean()
+    success_rate = (positive_returns / len(spikes)) * 100 if len(spikes) > 0 else 0
+
+    # Calculate correlation strength (simple correlation coefficient)
+    correlation_strength = df['Spike'].astype(int).corr(df['Return'].fillna(0)) if len(df.dropna()) > 1 else 0
+
+    return {
+        'total_spikes': len(spikes),
+        'positive_returns': positive_returns,
+        'negative_returns': negative_returns,
+        'avg_return_after_spike': avg_return,
+        'success_rate': success_rate,
+        'correlation_strength': correlation_strength
+    }
+
+
+def predict_from_recent_spikes(df: pd.DataFrame, rolling_window: int = 20, multiplier: float = 2.0, forecast_days: int = 5) -> dict:
+    """Predict future price movement based on recent volume spikes and historical correlation.
+
+    Args:
+        df: DataFrame with stock data
+        rolling_window: Number of days for volume moving average
+        multiplier: Threshold multiplier for spike detection
+        forecast_days: Number of days to predict into the future
+
+    Returns:
+        Dictionary with prediction details
+    """
+    df = df.copy()
+
+    # Analyze historical correlation
+    correlation_stats = analyze_volume_price_correlation(df, rolling_window, multiplier, forecast_days)
+
+    # Apply spike detection to the entire dataset to ensure proper Vol_MA calculation
+    df_with_spikes = detect_spikes(df, rolling_window, multiplier)
+
+    # Get recent spikes (last 10 days) from the dataset with spikes already calculated
+    recent_df = df_with_spikes.tail(10).copy()
+    recent_spikes = recent_df[recent_df['Spike']]
+
+    if len(recent_spikes) == 0:
+        return {
+            'prediction': 'neutral',
+            'confidence': 0,
+            'direction': 0,
+            'forecast_days': forecast_days,
+            'message': 'No recent volume spikes detected',
+            'correlation_stats': correlation_stats
+        }
+
+    # Use historical correlation to make prediction
+    avg_return = correlation_stats['avg_return_after_spike']
+    success_rate = correlation_stats['success_rate']
+    correlation_strength = correlation_stats['correlation_strength']
+
+    # Determine prediction direction
+    if avg_return > 0:
+        prediction = 'up'
+        direction = 1
+    elif avg_return < 0:
+        prediction = 'down'
+        direction = -1
+    else:
+        prediction = 'neutral'
+        direction = 0
+
+    # Calculate confidence based on success rate and correlation strength
+    # Normalize correlation strength to 0-100 range
+    abs_corr_strength = min(abs(correlation_strength) * 100, 100)
+    confidence = min((success_rate + abs_corr_strength) / 2, 100)
+
+    return {
+        'prediction': prediction,
+        'confidence': confidence,
+        'direction': direction,
+        'forecast_days': forecast_days,
+        'message': f'Based on {len(recent_spikes)} recent volume spike(s) and historical correlation',
+        'correlation_stats': correlation_stats
+    }
+
 def main():
     # Basic i18n translations for English and Chinese
     LANG = {
@@ -76,6 +192,22 @@ def main():
             'export_chart': "Export Chart",
             'export_png': "Download PNG",
             'export_html': "Download HTML",
+            'download_csv': "Download CSV Data",
+            'volume_spike_prediction': "Volume Spike Prediction",
+            'historical_correlation': "Historical Correlation",
+            'total_spikes_analyzed': "Total Spikes Analyzed",
+            'avg_return_after_spike': "Average Return After Spike",
+            'success_rate': "Success Rate",
+            'correlation_strength': "Correlation Strength",
+            'recent_spike_prediction': "Recent Spike Prediction",
+            'prediction_direction': "Prediction Direction",
+            'confidence_level': "Confidence Level",
+            'forecast_period': "Forecast Period (Days)",
+            'prediction_message': "Prediction Message",
+            'up': "Up",
+            'down': "Down",
+            'neutral': "Neutral",
+            'days': "days",
             'spike_marker': "Spike Marker",
             'export_png_warning': "PNG export requires kaleido; providing HTML export instead.",
             'spike_help': "Spike detection uses a rolling volume average and marks bars where Volume > multiplier * Vol MA. Adjust the rolling window and multiplier to tune sensitivity.",
@@ -115,6 +247,22 @@ def main():
             'export_chart': "导出图表",
             'export_png': "下载 PNG",
             'export_html': "下载 HTML",
+            'download_csv': "下载 CSV 数据",
+            'volume_spike_prediction': "成交量峰值预测",
+            'historical_correlation': "历史相关性",
+            'total_spikes_analyzed': "分析的峰值总数",
+            'avg_return_after_spike': "峰值后平均回报率",
+            'success_rate': "成功率",
+            'correlation_strength': "相关强度",
+            'recent_spike_prediction': "近期峰值预测",
+            'prediction_direction': "预测方向",
+            'confidence_level': "置信水平",
+            'forecast_period': "预测期（天）",
+            'prediction_message': "预测信息",
+            'up': "上涨",
+            'down': "下跌",
+            'neutral': "中性",
+            'days': "天",
             'spike_marker': "峰值标记",
             'export_png_warning': "PNG 导出需要 kaleido；已改为提供 HTML 导出。",
             'spike_help': "峰值检测使用成交量的滚动平均，峰值定义为成交量 > 阈值乘以滚动平均。通过调整滚动窗口和阈值乘数来调节灵敏度。",
@@ -175,6 +323,11 @@ def main():
     show_guidelines = st.sidebar.checkbox(LANG[lang]['show_guidelines'], value=True)
     show_legend = st.sidebar.checkbox(LANG[lang]['show_legend'], value=False)
     st.sidebar.caption(LANG[lang]['spike_help'])
+    # Prediction settings
+    st.sidebar.markdown("---")
+    st.sidebar.subheader(LANG[lang]['volume_spike_prediction'])
+    forecast_days = st.sidebar.slider(LANG[lang]['forecast_period'], min_value=1, max_value=30, value=5, step=1)
+
     st.sidebar.markdown("---")
     st.sidebar.subheader(LANG[lang]['export_chart'])
 
@@ -198,6 +351,52 @@ def main():
         col2.metric(LANG[lang]['highest_5y'], highest)
         col3.metric(LANG[lang]['lowest_5y'], lowest)
         col4.metric(LANG[lang]['avg_volume'], avg_vol)
+
+        # Volume Spike Prediction Section
+        st.subheader(LANG[lang]['volume_spike_prediction'])
+
+        # Analyze historical correlation
+        correlation_data = analyze_volume_price_correlation(df, rolling_window, threshold, forecast_days)
+
+        # Show historical correlation metrics
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric(LANG[lang]['total_spikes_analyzed'], correlation_data['total_spikes'])
+        with col2:
+            st.metric(LANG[lang]['avg_return_after_spike'], f"{correlation_data['avg_return_after_spike']:.2%}")
+        with col3:
+            st.metric(LANG[lang]['success_rate'], f"{correlation_data['success_rate']:.1f}%")
+
+        # Show correlation strength
+        st.progress(min(max(correlation_data['correlation_strength'], -1), 1) / 2 + 0.5)
+        st.caption(f"{LANG[lang]['correlation_strength']}: {correlation_data['correlation_strength']:.3f}")
+
+        # Make prediction based on recent spikes
+        prediction_data = predict_from_recent_spikes(df, rolling_window, threshold, forecast_days)
+
+        # Show prediction
+        st.subheader(LANG[lang]['recent_spike_prediction'])
+        pred_col1, pred_col2, pred_col3 = st.columns(3)
+
+        with pred_col1:
+            # Determine color based on prediction
+            if prediction_data['prediction'] == 'up':
+                pred_color = "green"
+                pred_text = LANG[lang]['up']
+            elif prediction_data['prediction'] == 'down':
+                pred_color = "red"
+                pred_text = LANG[lang]['down']
+            else:
+                pred_color = "gray"
+                pred_text = LANG[lang]['neutral']
+
+            st.metric(LANG[lang]['prediction_direction'], f":{pred_color}[{pred_text}]")
+        with pred_col2:
+            st.metric(LANG[lang]['confidence_level'], f"{prediction_data['confidence']:.1f}%")
+        with pred_col3:
+            st.metric(LANG[lang]['forecast_period'], f"{prediction_data['forecast_days']} {LANG[lang]['days']}")
+
+        st.info(prediction_data['message'])
 
         # Interactive Chart
         st.subheader(LANG[lang]['price_volume_chart'])
@@ -394,14 +593,42 @@ def main():
         st.plotly_chart(fig, width="stretch")
 
         # Export buttons
+        # Create three columns for the download buttons
+        col1, col2, col3 = st.columns(3)
+
+        # PNG Download Button
         try:
             png_bytes = fig.to_image(format="png", scale=2)
-            st.download_button(LANG[lang]['export_png'], data=png_bytes, file_name=f"{ticker}_annotated.png", mime="image/png")
+            with col1:
+                st.download_button(
+                    LANG[lang]['export_png'],
+                    data=png_bytes,
+                    file_name=f"{ticker}_annotated.png",
+                    mime="image/png"
+                )
         except Exception:
-            st.warning(LANG[lang]['export_png_warning'])
+            with col1:
+                st.warning(LANG[lang]['export_png_warning'])
 
+        # HTML Download Button
         html = fig.to_html(include_plotlyjs='cdn')
-        st.download_button(LANG[lang]['export_html'], data=html, file_name=f"{ticker}_annotated.html", mime="text/html")
+        with col2:
+            st.download_button(
+                LANG[lang]['export_html'],
+                data=html,
+                file_name=f"{ticker}_annotated.html",
+                mime="text/html"
+            )
+
+        # CSV Download Button
+        csv = df.reset_index().to_csv(index=False)
+        with col3:
+            st.download_button(
+                label=LANG[lang]['download_csv'],
+                data=csv,
+                file_name=f"{ticker}_5y.csv",
+                mime='text/csv',
+            )
 
         # Checkbox to show raw data
         if st.checkbox(LANG[lang]['show_raw']):
