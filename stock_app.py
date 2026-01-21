@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import glob
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -174,45 +175,68 @@ def main():
                                      close=df['Close'], name="OHLC"), 
                       row=1, col=1)
 
-        # Annotate Spikes
-        spike_dates = df[df['Spike']].index
-        
-        for date in spike_dates:
-            # Check return
-            ret = df.loc[date, 'Return']
-            if pd.isna(ret):
-                color = "gray"
-                symbol = "circle" # Wait
-                opacity = 0.5
-            elif ret > 0:
-                color = "#00FF00" # Green for rise
-                symbol = "triangle-up"
-                opacity = 1.0
-            else:
-                color = "#FF0000" # Red for fall
-                symbol = "triangle-down"
-                opacity = 1.0
-                
-            fig.add_annotation(
-                x=date, 
-                y=df.loc[date, 'High'],
-                text="", # Removed "V" text to reduce clutter, symbol is enough
-                showarrow=True,
-                arrowhead=2, # Optimized arrow head
-                arrowsize=1,
-                arrowwidth=2,
-                arrowcolor=color,
-                opacity=opacity,
-                ax=0,
-                ay=-25, # Slightly higher offset
+        # Annotate Spikes and link them to volume bars
+        spikes_df = df[df['Spike']].copy()
+
+        if not spikes_df.empty:
+            # Prepare colors/symbols and marker scatter on price chart
+            marker_colors = []
+            marker_symbols = []
+            for ret in spikes_df['Return']:
+                if pd.isna(ret):
+                    marker_colors.append('gray')
+                    marker_symbols.append('circle')
+                elif ret > 0:
+                    marker_colors.append('#00FF00')
+                    marker_symbols.append('triangle-up')
+                else:
+                    marker_colors.append('#FF0000')
+                    marker_symbols.append('triangle-down')
+
+            # Price markers with hover (show volume and forward return)
+            fig.add_trace(
+                go.Scatter(
+                    x=spikes_df.index,
+                    y=spikes_df['High'] * 1.01,  # place marker slightly above high
+                    mode='markers',
+                    marker=dict(symbol=marker_symbols, color=marker_colors, size=12),
+                    customdata=np.stack([spikes_df['Volume'].astype(int), spikes_df['Return']], axis=-1),
+                    hovertemplate='Date: %{x|%Y-%m-%d}<br>Vol: %{customdata[0]:,}<br>Return: %{customdata[1]:.2%}<extra></extra>'
+                ),
                 row=1, col=1
             )
 
-        # Volume
-        colors = ['red' if row['Open'] - row['Close'] >= 0 
-                  else 'green' for index, row in df.iterrows()]
-        fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color=colors, name=LANG[lang]['volume']), 
-                      row=2, col=1)
+            # Vertical guideline linking price marker to volume bar across subplots
+            for i, date in enumerate(spikes_df.index):
+                fig.add_shape(
+                    type='line',
+                    x0=date,
+                    x1=date,
+                    xref='x',
+                    y0=0,
+                    y1=1,
+                    yref='paper',
+                    line=dict(color=marker_colors[i], width=1, dash='dot'),
+                    opacity=0.6
+                )
+
+        # Volume with enhanced hover and marked spike bars
+        bar_colors = ['red' if row['Open'] - row['Close'] >= 0 else 'green' for index, row in df.iterrows()]
+        marker_line_colors = ['yellow' if s else 'rgba(0,0,0,0)' for s in df['Spike']]
+        marker_line_widths = [1 if s else 0 for s in df['Spike']]
+
+        fig.add_trace(
+            go.Bar(
+                x=df.index,
+                y=df['Volume'],
+                marker_color=bar_colors,
+                marker_line_color=marker_line_colors,
+                marker_line_width=marker_line_widths,
+                customdata=np.stack([df['Volume'].astype(int), df['Return'], df['Spike']], axis=-1),
+                hovertemplate='Volume: %{customdata[0]:,}<br>Return: %{customdata[1]:.2%}<br>Spike: %{customdata[2]}<extra></extra>'
+            ),
+            row=2, col=1
+        )
         
         # Add Moving Average to Volume to show spikes better
         fig.add_trace(go.Scatter(x=df.index, y=df['Vol_MA'], line=dict(color='orange', width=1), name="Vol MA(20)"), 
