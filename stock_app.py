@@ -28,6 +28,19 @@ def load_data(file_path):
     return df
 
 
+def preload_default_data():
+    """Preload default data for GOOG if it doesn't exist."""
+    default_file = "GOOG_5y.csv"
+    if not os.path.exists(default_file):
+        try:
+            stock = yf.Ticker("GOOG")
+            df = stock.history(period="5y")
+            if not df.empty:
+                df.to_csv(default_file)
+                print(f"Preloaded default data: {default_file} ({len(df)} rows)")
+        except Exception as e:
+            print(f"Could not preload default data: {e}")
+
 def detect_spikes(df: pd.DataFrame, rolling_window: int = 20, multiplier: float = 2.0) -> pd.DataFrame:
     """Return a copy of df with 'Vol_MA' and 'Spike' columns calculated.
 
@@ -38,6 +51,72 @@ def detect_spikes(df: pd.DataFrame, rolling_window: int = 20, multiplier: float 
     df['Spike'] = (df['Volume'] > (multiplier * df['Vol_MA'])) & df['Vol_MA'].notna()
     return df
 
+
+def predict_next_price(df: pd.DataFrame, method: str = 'momentum', lookback: int = 20, horizon: int = 5):
+    """Simple prediction methods returning predicted price and expected return."""
+    prices = df['Close'].dropna()
+    if prices.empty:
+        return None, None
+
+    if method == 'momentum':
+        # mean return over lookback days applied to last price
+        returns = prices.pct_change().dropna()
+        recent = returns.tail(lookback)
+        mu = recent.mean() if not recent.empty else 0.0
+        pred = prices.iloc[-1] * (1 + mu * horizon)
+        exp_ret = (pred - prices.iloc[-1]) / prices.iloc[-1]
+        return float(pred), float(exp_ret)
+    elif method == 'linear':
+        # fit linear trend to last lookback points and extrapolate
+        y = prices.tail(lookback).values
+        if len(y) < 2:
+            return None, None
+        x = np.arange(len(y))
+        m, b = np.polyfit(x, y, 1)
+        pred = m * (len(y) - 1 + horizon) + b
+        exp_ret = (pred - prices.iloc[-1]) / prices.iloc[-1]
+        return float(pred), float(exp_ret)
+    elif method == 'ema':
+        # EMA drift: difference between last close and EMA, carry forward
+        ema = prices.ewm(span=lookback, adjust=False).mean()
+        last_ema = ema.iloc[-1]
+        drift = prices.iloc[-1] - last_ema
+        pred = prices.iloc[-1] + drift * horizon / max(1, lookback/5)
+        exp_ret = (pred - prices.iloc[-1]) / prices.iloc[-1]
+        return float(pred), float(exp_ret)
+    else:
+        return None, None
+
+
+def backtest_prediction(df: pd.DataFrame, method: str, lookback: int, horizon: int):
+    """Backtest prediction over historical series and return MAE and direction accuracy."""
+    prices = df['Close'].dropna()
+    preds = []
+    trues = []
+    for i in range(lookback, len(prices) - horizon):
+        window = prices.iloc[i - lookback:i]
+        future = prices.iloc[i + horizon]
+        # create a temp df-like series
+        temp_df = window.to_frame(name='Close')
+        pred, _ = predict_next_price(temp_df, method=method, lookback=lookback, horizon=horizon)
+        if pred is None:
+            continue
+        preds.append(pred)
+        trues.append(future)
+    if not preds:
+        return None, None
+    preds = np.array(preds)
+    trues = np.array(trues)
+    mae = float(np.mean(np.abs(preds - trues)))
+    dir_acc = float(np.mean((preds - trues.mean()) * (trues - trues.mean()) > 0)) if len(preds) > 0 else 0.0
+    # better direction accuracy: compare sign of (pred - last) and (true - last)
+    signs = []
+    for i, p in enumerate(preds):
+        last = (i + lookback - 1)
+        last_price = prices.iloc[last]
+        signs.append((p - last_price) * (trues[i] - last_price) > 0)
+    dir_acc2 = float(np.mean(signs)) if signs else 0.0
+    return mae, dir_acc2
 
 def analyze_volume_price_correlation(df: pd.DataFrame, rolling_window: int = 20, multiplier: float = 2.0, forecast_days: int = 5) -> dict:
     """Analyze historical correlation between volume spikes and price movements.
@@ -126,24 +205,38 @@ def predict_from_recent_spikes(df: pd.DataFrame, rolling_window: int = 20, multi
 
     # Use historical correlation to make prediction
     avg_return = correlation_stats['avg_return_after_spike']
-    success_rate = correlation_stats['success_rate']
+    success_rate_up = (correlation_stats['positive_returns'] / correlation_stats['total_spikes']) * 100 if correlation_stats['total_spikes'] > 0 else 0
+    success_rate_down = (correlation_stats['negative_returns'] / correlation_stats['total_spikes']) * 100 if correlation_stats['total_spikes'] > 0 else 0
     correlation_strength = correlation_stats['correlation_strength']
 
-    # Determine prediction direction
-    if avg_return > 0:
+    # Determine prediction direction based on historical correlation between spikes and upward price trends
+    if correlation_strength > 0.1:  # Positive correlation with upward movement
         prediction = 'up'
         direction = 1
-    elif avg_return < 0:
+    elif correlation_strength < -0.1:  # Negative correlation with upward movement (i.e., correlation with downward movement)
         prediction = 'down'
         direction = -1
     else:
-        prediction = 'neutral'
-        direction = 0
+        # Weak correlation — apply fallback rules using avg_return and success rate margins
+        # Prefer average return if effect size (abs) exceeds min_effect
+        if abs(avg_return) >= min_effect and len(recent_spikes) >= min_spikes:
+            prediction = 'up' if avg_return > 0 else 'down'
+            direction = 1 if avg_return > 0 else -1
+        # Otherwise, check success rate margin
+        elif (success_rate_up >= success_rate_down + success_margin) and len(recent_spikes) >= min_spikes:
+            prediction = 'up'
+            direction = 1
+        elif (success_rate_down >= success_rate_up + success_margin) and len(recent_spikes) >= min_spikes:
+            prediction = 'down'
+            direction = -1
+        else:
+            prediction = 'neutral'
+            direction = 0
 
-    # Calculate confidence based on success rate and correlation strength
-    # Normalize correlation strength to 0-100 range
+    # Calculate confidence based on correlation strength and success rates
+    # Higher weight to correlation strength as it's a more direct measure of relationship
     abs_corr_strength = min(abs(correlation_strength) * 100, 100)
-    confidence = min((success_rate + abs_corr_strength) / 2, 100)
+    confidence = min((abs_corr_strength * 0.7 + success_rate_up * 0.3), 100)
 
     return {
         'prediction': prediction,
@@ -151,15 +244,25 @@ def predict_from_recent_spikes(df: pd.DataFrame, rolling_window: int = 20, multi
         'direction': direction,
         'forecast_days': forecast_days,
         'message': f'Based on {len(recent_spikes)} recent volume spike(s) and historical correlation',
-        'correlation_stats': correlation_stats
+        'correlation_stats': correlation_stats,
+        'avg_return': avg_return,
+        'success_rate_up': success_rate_up,
+        'success_rate_down': success_rate_down,
+        'recent_spikes_count': len(recent_spikes),
+        'min_effect_used': min_effect,
+        'success_margin_used': success_margin,
+        'min_spikes_used': min_spikes
     }
 
 def main():
+    # Preload default data for GOOG
+    preload_default_data()
+
     # Basic i18n translations for English and Chinese
     LANG = {
         'en': {
             'page_title': "Stock Analysis App",
-            'title': "Interactive Stock Analysis",
+            'title': "Interactive Stock Analysis/Prediction",
             'select_existing': "Select Existing Data",
             'choose_file': "Choose a file:",
             'fetch_new': "Fetch New Data",
@@ -199,7 +302,7 @@ def main():
             'avg_return_after_spike': "Average Return After Spike",
             'success_rate': "Success Rate",
             'correlation_strength': "Correlation Strength",
-            'recent_spike_prediction': "Recent Spike Prediction",
+            'recent_spike_prediction': "Future Price Prediction",
             'prediction_direction': "Prediction Direction",
             'confidence_level': "Confidence Level",
             'forecast_period': "Forecast Period (Days)",
@@ -211,10 +314,30 @@ def main():
             'spike_marker': "Spike Marker",
             'export_png_warning': "PNG export requires kaleido; providing HTML export instead.",
             'spike_help': "Spike detection uses a rolling volume average and marks bars where Volume > multiplier * Vol MA. Adjust the rolling window and multiplier to tune sensitivity.",
+            'min_effect': "Min effect size (avg return)",
+            'success_margin': "Success rate margin (%)",
+            'min_spikes': "Min recent spikes to act",
+            'diagnostics': "Diagnostics",
+            'recent_spikes_count': "Recent Spikes Count",
+            'success_rate_up': "Success Rate Up",
+            'success_rate_down': "Success Rate Down",
+            'min_effect_help': "If correlation is weak, fall back to average return or success-rate rules when effect size or margin exceed these thresholds.",
+            'prediction': "Prediction",
+            'prediction_method': "Method",
+            'prediction_lookback': "Lookback (days)",
+            'prediction_horizon': "Horizon (days)",
+            'method_momentum': "Momentum (mean returns)",
+            'method_linear': "Linear trend",
+            'method_ema': "EMA drift",
+            'predicted_price': "Predicted Price",
+            'predicted_return': "Predicted Return",
+            'pred_mae': "Backtest MAE",
+            'pred_dir_acc': "Direction Accuracy",
+            'pred_help': "Simple short-term prediction methods (no financial advice). Use backtest metrics to gauge effectiveness.",
         },
         'zh': {
             'page_title': "股票分析应用",
-            'title': "交互式股票分析",
+            'title': "交互式股票分析/预测",
             'select_existing': "选择已有数据",
             'choose_file': "选择文件：",
             'fetch_new': "获取新数据",
@@ -254,7 +377,7 @@ def main():
             'avg_return_after_spike': "峰值后平均回报率",
             'success_rate': "成功率",
             'correlation_strength': "相关强度",
-            'recent_spike_prediction': "近期峰值预测",
+            'recent_spike_prediction': "未来价格预测",
             'prediction_direction': "预测方向",
             'confidence_level': "置信水平",
             'forecast_period': "预测期（天）",
@@ -266,11 +389,31 @@ def main():
             'spike_marker': "峰值标记",
             'export_png_warning': "PNG 导出需要 kaleido；已改为提供 HTML 导出。",
             'spike_help': "峰值检测使用成交量的滚动平均，峰值定义为成交量 > 阈值乘以滚动平均。通过调整滚动窗口和阈值乘数来调节灵敏度。",
+            'prediction': "预测",
+            'prediction_method': "方法",
+            'prediction_lookback': "回溯窗口（天）",
+            'prediction_horizon': "预测期（天）",
+            'method_momentum': "动量（平均收益）",
+            'method_linear': "线性趋势",
+            'method_ema': "EMA 漂移",
+            'predicted_price': "预测价格",
+            'predicted_return': "预测收益",
+            'pred_mae': "回测平均绝对误差",
+            'pred_dir_acc': "方向准确率",
+            'pred_help': "简单的短期预测方法（非投资建议）。使用回测指标评估性能。",
+            'min_effect': "最小效应大小（平均收益）",
+            'success_margin': "成功率差距（%）",
+            'min_spikes': "最小近期峰值数量",
+            'diagnostics': "诊断信息",
+            'recent_spikes_count': "近期峰值数量",
+            'success_rate_up': "上涨成功率",
+            'success_rate_down': "下跌成功率",
+            'min_effect_help': "若相关性薄弱，则当平均回报或成功率差距超过阈值时采用回退规则。",
         }
     }
 
-    # Language selector
-    lang_choice = st.sidebar.selectbox(LANG['en']['language_label'], ["English", "中文"], index=0)
+    # Language selector - default to Chinese
+    lang_choice = st.sidebar.selectbox(LANG['en']['language_label'], ["English", "中文"], index=1)
     lang = 'en' if lang_choice == 'English' else 'zh'
 
     def t(key, **kwargs):
@@ -289,13 +432,18 @@ def main():
     with header_col:
         st.title(LANG[lang]['title'])
     with icon_col:
-        st.image("assets/taotaoapp.jpg", width=272)
+        st.image("assets/taotaoapp.jpg", width=72)
 
 
     # Sidebar for file selection
     st.sidebar.subheader(LANG[lang]['select_existing'])
     csv_files = glob.glob("*_5y.csv")
-    selected_file = st.sidebar.selectbox(LANG[lang]['choose_file'], csv_files) if csv_files else None
+
+    # Set default file to GOOG_5y.csv if it exists
+    default_file = "GOOG_5y.csv" if "GOOG_5y.csv" in csv_files else None
+    default_index = csv_files.index(default_file) if default_file and default_file in csv_files else 0
+
+    selected_file = st.sidebar.selectbox(LANG[lang]['choose_file'], csv_files, index=default_index) if csv_files else None
 
     # Sidebar for new data fetch
     st.sidebar.markdown("---")
@@ -323,6 +471,15 @@ def main():
     show_guidelines = st.sidebar.checkbox(LANG[lang]['show_guidelines'], value=True)
     show_legend = st.sidebar.checkbox(LANG[lang]['show_legend'], value=False)
     st.sidebar.caption(LANG[lang]['spike_help'])
+
+    # Fallback rule parameters for weak correlation
+    st.sidebar.markdown("---")
+    st.sidebar.subheader(LANG[lang]['diagnostics'])
+    min_effect = st.sidebar.slider(LANG[lang]['min_effect'], min_value=0.0, max_value=0.05, value=0.005, step=0.001, format="%.3f")
+    success_margin = st.sidebar.slider(LANG[lang]['success_margin'], min_value=0, max_value=50, value=10, step=1)
+    min_spikes = st.sidebar.slider(LANG[lang]['min_spikes'], min_value=1, max_value=10, value=1, step=1)
+    st.sidebar.caption(LANG[lang]['min_effect_help'])
+
     # Prediction settings
     st.sidebar.markdown("---")
     st.sidebar.subheader(LANG[lang]['volume_spike_prediction'])
@@ -330,6 +487,14 @@ def main():
 
     st.sidebar.markdown("---")
     st.sidebar.subheader(LANG[lang]['export_chart'])
+
+    # Prediction controls
+    st.sidebar.markdown('---')
+    st.sidebar.subheader(LANG[lang]['prediction'])
+    st.sidebar.caption(LANG[lang]['pred_help'])
+    pred_method = st.sidebar.selectbox(LANG[lang]['prediction_method'], [LANG[lang]['method_momentum'], LANG[lang]['method_linear'], LANG[lang]['method_ema']])
+    pred_lookback = st.sidebar.slider(LANG[lang]['prediction_lookback'], min_value=3, max_value=252, value=20, step=1)
+    pred_horizon = st.sidebar.slider(LANG[lang]['prediction_horizon'], min_value=1, max_value=20, value=5, step=1)
 
     if selected_file:
         ticker = selected_file.replace("_5y.csv", "")
@@ -397,6 +562,33 @@ def main():
             st.metric(LANG[lang]['forecast_period'], f"{prediction_data['forecast_days']} {LANG[lang]['days']}")
 
         st.info(prediction_data['message'])
+
+        # Diagnostics display
+        st.subheader(LANG[lang]['diagnostics'])
+        dcol1, dcol2, dcol3 = st.columns(3)
+        dcol1.metric(LANG[lang]['recent_spikes_count'], prediction_data.get('recent_spikes_count', 0))
+        dcol2.metric(LANG[lang]['success_rate_up'], f"{prediction_data.get('success_rate_up', 0):.1f}%")
+        dcol3.metric(LANG[lang]['success_rate_down'], f"{prediction_data.get('success_rate_down', 0):.1f}%")
+        st.caption(f"avg_return: {prediction_data.get('avg_return', 0):.3%} | corr: {prediction_data['correlation_stats'].get('correlation_strength', 0):.3f}")
+
+        # Short-term numeric forecasts using selected method
+        method_map = {
+            LANG[lang]['method_momentum']: 'momentum',
+            LANG[lang]['method_linear']: 'linear',
+            LANG[lang]['method_ema']: 'ema'
+        }
+        selected_method = method_map.get(pred_method, 'momentum')
+        pred_price, pred_ret = predict_next_price(df, method=selected_method, lookback=pred_lookback, horizon=pred_horizon)
+        mae, dir_acc = backtest_prediction(df, method=selected_method, lookback=pred_lookback, horizon=pred_horizon)
+
+        s_col1, s_col2, s_col3 = st.columns(3)
+        with s_col1:
+            s_col1.metric(LANG[lang]['predicted_price'], f"{pred_price:.2f}" if pred_price is not None else "N/A")
+        with s_col2:
+            s_col2.metric(LANG[lang]['predicted_return'], f"{pred_ret*100:.2f}%" if pred_ret is not None else "N/A")
+        with s_col3:
+            s_col3.metric(LANG[lang]['pred_mae'], f"{mae:.2f}" if mae is not None else "N/A")
+            st.caption(f"{LANG[lang]['pred_dir_acc']}: {dir_acc:.2f}" if dir_acc is not None else "")
 
         # Interactive Chart
         st.subheader(LANG[lang]['price_volume_chart'])
@@ -590,6 +782,14 @@ def main():
             margin=dict(l=50, r=50, t=50, b=50) # Optimized margins
         )
         
+        # Add predicted price marker (if available)
+        try:
+            if 'pred_price' in locals() and pred_price is not None:
+                pred_x = df.index[-1] + pd.Timedelta(days=pred_horizon)
+                fig.add_trace(go.Scatter(x=[pred_x], y=[pred_price], mode='markers+text', marker=dict(color='cyan', size=14, symbol='diamond'), text=[f"{pred_price:.2f}"], textposition='top center', name='Prediction'), row=1, col=1)
+        except Exception:
+            pass
+
         st.plotly_chart(fig, width="stretch")
 
         # Export buttons
