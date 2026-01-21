@@ -133,8 +133,16 @@ def main():
         except Exception:
             return txt
 
-    st.set_page_config(page_title=LANG[lang]['page_title'], layout="wide")
-    st.title(LANG[lang]['title'])
+    # Use project brand icon as page favicon and show it in the top-right of the header
+    st.set_page_config(page_title=LANG[lang]['page_title'], layout="wide", page_icon="assets/taotaoapp.jpg")
+
+    # Header layout: title on the left, brand icon on the right (272px)
+    header_col, icon_col = st.columns([8, 1])
+    with header_col:
+        st.title(LANG[lang]['title'])
+    with icon_col:
+        st.image("assets/taotaoapp.jpg", width=272)
+
 
     # Sidebar for file selection
     st.sidebar.subheader(LANG[lang]['select_existing'])
