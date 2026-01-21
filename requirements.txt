@@ -24,3 +24,5 @@ typing_extensions==4.15.0
 urllib3==2.6.3
 websockets==16.0
 yfinance==1.0
+kaleido==0.2.1
+pytest==7.4.0

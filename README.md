@@ -67,6 +67,20 @@ streamlit run stock_app.py
 
 ---
 
+## Screenshots
+
+Below are two representative screenshots (placeholders) showing the app UI and volume spike markers linked to the price chart.
+
+![App UI](screenshots/app_ui.svg)
+
+*Figure: Main app interface with chart area and sidebar controls.*
+
+![Spike Markers](screenshots/spike_markers.svg)
+
+*Figure: Volume spike markers with dashed guideline lines connecting to volume bars.*
+
+---
+
 ## Files overview
 
 - `fetch_stock_data.py` — CLI script to download and save 5-year historical data for a list of tickers.
@@ -89,7 +103,8 @@ streamlit run stock_app.py
 ## Suggested Improvements
 
 - Add CLI arguments (`argparse`) to `fetch_stock_data.py` for user-specified tickers and periods.
-- Add unit tests for the volume analysis logic and CI pipeline (GitHub Actions) for linting/tests.
+- Unit tests were added for spike detection logic (`tests/test_detect_spikes.py`). Run them with `pytest`.
+- New UI controls: spike detection rolling window and multiplier sliders, toggles for spike markers and guideline lines, and chart exports (PNG requires `kaleido`).
 - Centralize fetching logic into a reusable module to prevent duplicated code.
 
 ---
